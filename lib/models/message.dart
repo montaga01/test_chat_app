@@ -18,6 +18,14 @@ class Message {
     senderId: j['sender_id'],
     receiverId: j['receiver_id'],
     content: j['content'],
-    timestamp: DateTime.tryParse(j['timestamp'] ?? '') ?? DateTime.now(),
+    timestamp: _parseTs(j['timestamp']),
   );
+  // وأضف دالة static في نفس الكلاس:
+  static DateTime _parseTs(dynamic val) {
+    if (val == null) return DateTime.now();
+    final s = val.toString();
+    if (s.isEmpty) return DateTime.now();
+    final normalized = (s.contains('Z') || s.contains('+')) ? s : '${s}Z';
+    return DateTime.tryParse(normalized)?.toLocal() ?? DateTime.now();
+  }
 }

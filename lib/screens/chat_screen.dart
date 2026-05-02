@@ -11,6 +11,7 @@ import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../widgets/avatar_widget.dart';
 import '../widgets/typing_indicator.dart';
+import '../widgets/message_bubble.dart';
 
 // ── حالة الرسالة ──
 enum _MsgStatus { sending, sent, failed }
@@ -61,19 +62,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _init() async {
-    // تحميل الرسائل القديمة
-    try {
-      final msgs = await ApiService.getMessages(widget.otherUser.id);
-      if (!mounted) return;
-      setState(() {
-        _messages = msgs.map((m) => _LocalMessage(msg: m)).toList();
-        _loading  = false;
-      });
-      _scrollToBottom(jump: true);
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-
+  try {
+    final msgs = await ApiService.getMessages(widget.otherUser.id);
+    if (!mounted) return;
+    setState(() {
+      _messages = msgs.map((m) => _LocalMessage(msg: m)).toList();
+      _loading  = false;
+    });
+    _scrollToBottom(jump: true);
+    ApiService.markRead(widget.otherUser.id); // ← هنا
+  } catch (_) {
+    if (mounted) setState(() => _loading = false);
+  }
     // اطلب presence — نفس requestPresence() + fetchPresenceHTTP() من JS
     widget.presenceProvider.refreshUser(widget.otherUser.id);
 
@@ -225,6 +225,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           body: Column(
             children: [
               Expanded(child: _buildMessageList(c)),
+              TypingIndicatorAnimated(        // ← هنا
+                isVisible: isTyping,
+                userName:  widget.otherUser.name,
+              ),
               _buildInputArea(c),
             ],
           ),
@@ -269,15 +273,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   ),
                 ),
                 // typing أو last seen — نفس منطق صفحة الويب
-                isTyping
-                    ? const TypingIndicator()
-                    : Text(
-                        statusText ?? 'آخر ظهور مؤخراً',
-                        style: GoogleFonts.ibmPlexSansArabic(
-                          fontSize: 12,
-                          color:    isOnline ? c.green : c.text2,
-                        ),
-                      ),
+                                   
+                      Text(
+                  widget.otherUser.name,          // ← الاسم دايماً ثابت
+                  style: GoogleFonts.ibmPlexSansArabic(
+                    fontWeight: FontWeight.w700, fontSize: 16, color: c.text,
+                  ),
+                ),
+                AnimatedSwitcher(                 // ← السطر الثاني يتغير بين "يكتب..." و"آخر ظهور"
+                  duration: const Duration(milliseconds: 200),
+                  child: Text(
+                    isTyping ? 'يكتب...' : (statusText ?? 'آخر ظهور مؤخراً'),
+                    key: ValueKey(isTyping),
+                    style: GoogleFonts.ibmPlexSansArabic(
+                      fontSize: 12,
+                      color: isTyping ? c.accent : (isOnline ? c.green : c.text2),
+                    ),
+                  ),
+                ),
               ],
             ),
           ),
@@ -375,88 +388,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // ── فقاعة الرسالة ──
   Widget _buildBubble(_LocalMessage local, bool isMe, AppColorScheme c) {
-    final msg        = local.msg;
-    final isFailed   = local.status == _MsgStatus.failed;
-    final isSending  = local.status == _MsgStatus.sending;
-
+    // ── حدد موقع الرسالة في مجموعتها ──
+    final i            = _messages.indexOf(local);
+    final prevSameUser = i > 0 && _messages[i-1].msg.senderId == local.msg.senderId;
+    final nextSameUser = i < _messages.length - 1 && _messages[i+1].msg.senderId == local.msg.senderId;
+  
     return AnimatedOpacity(
-      opacity:  isSending ? 0.65 : 1.0,
+      opacity:  local.status == _MsgStatus.sending ? 0.65 : 1.0,
       duration: const Duration(milliseconds: 200),
-      child: Align(
-        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 12),
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.72,
-          ),
-          child: Column(
-            crossAxisAlignment:
-                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-            children: [
-              // فقاعة النص
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14, vertical: 10,
-                ),
-                decoration: isMe
-                    ? AppDecorations.bubbleMe(c)
-                    : AppDecorations.bubbleOther(c),
-                child: Column(
-                  crossAxisAlignment: isMe
-                      ? CrossAxisAlignment.end
-                      : CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      msg.content,
-                      style: AppTextStyles.bubbleText(isMe: isMe, c: c),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          DateFormat('HH:mm').format(msg.timestamp.toLocal()),
-                          style: AppTextStyles.bubbleTime(isMe: isMe),
-                        ),
-                        // حالة الرسالة (للرسائل المُرسلة)
-                        if (isMe) ...[
-                          const SizedBox(width: 4),
-                          _statusIcon(local, c),
-                        ],
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-
-              // زر إعادة الإرسال عند الفشل
-              if (isFailed)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: GestureDetector(
-                    onTap: () => _retry(local),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.refresh_rounded, size: 14, color: c.red),
-                        const SizedBox(width: 4),
-                        Text(
-                          'فشل — اضغط للإعادة',
-                          style: GoogleFonts.ibmPlexSansArabic(
-                            fontSize: 11, color: c.red,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
+      child: MessageBubble(
+        message:        local.msg,
+        isMe:           isMe,
+        isFirstInGroup: !prevSameUser,
+        isLastInGroup:  !nextSameUser,
+        isPending:      local.status == _MsgStatus.sending,
+        hasFailed:      local.status == _MsgStatus.failed,
+        onRetry:        local.status == _MsgStatus.failed ? () => _retry(local) : null,
       ),
     );
   }
-
   // ── أيقونة حالة الرسالة ──
   Widget _statusIcon(_LocalMessage local, AppColorScheme c) {
     switch (local.status) {
