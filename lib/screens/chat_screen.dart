@@ -61,19 +61,24 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _init();
   }
 
+  // ✅ إصلاح: جمع كل كود _init في دالة واحدة متسلسلة بدون async gap
   Future<void> _init() async {
-  try {
-    final msgs = await ApiService.getMessages(widget.otherUser.id);
+    try {
+      final msgs = await ApiService.getMessages(widget.otherUser.id);
+      if (!mounted) return;
+      setState(() {
+        _messages = msgs.map((m) => _LocalMessage(msg: m)).toList();
+        _loading  = false;
+      });
+      _scrollToBottom(jump: true);
+      // علّم المحادثة كمقروءة
+      ApiService.markRead(widget.otherUser.id);
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+
     if (!mounted) return;
-    setState(() {
-      _messages = msgs.map((m) => _LocalMessage(msg: m)).toList();
-      _loading  = false;
-    });
-    _scrollToBottom(jump: true);
-    ApiService.markRead(widget.otherUser.id); // ← هنا
-  } catch (_) {
-    if (mounted) setState(() => _loading = false);
-  }
+
     // اطلب presence — نفس requestPresence() + fetchPresenceHTTP() من JS
     widget.presenceProvider.refreshUser(widget.otherUser.id);
 
@@ -97,6 +102,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _messages.add(_LocalMessage(msg: msg));
     });
     _scrollToBottom();
+
+    // علّم المحادثة كمقروءة تلقائياً عند وصول رسالة والشاشة مفتوحة
+    ApiService.markRead(widget.otherUser.id);
   }
 
   // ─────────────────────────────────────────────────
@@ -129,7 +137,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // نفترض النجاح — WS لا يرجع confirm موثوق
       setState(() => local.status = _MsgStatus.sent);
     } else {
-      // HTTP fallback — نفس منطق chat_screen القديم
+      // HTTP fallback
       await _sendViaHttp(local, text);
     }
   }
@@ -146,7 +154,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  // ── إعادة إرسال رسالة فاشلة — حل مشكلة سقوط الرسائل ──
+  // ── إعادة إرسال رسالة فاشلة ──
   void _retry(_LocalMessage local) async {
     setState(() => local.status = _MsgStatus.sending);
 
@@ -225,7 +233,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           body: Column(
             children: [
               Expanded(child: _buildMessageList(c)),
-              TypingIndicatorAnimated(        // ← هنا
+              TypingIndicatorAnimated(
                 isVisible: isTyping,
                 userName:  widget.otherUser.name,
               ),
@@ -264,6 +272,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // ✅ إصلاح: حذف النص المكرر — كان الاسم يظهر مرتين
                 Text(
                   widget.otherUser.name,
                   style: GoogleFonts.ibmPlexSansArabic(
@@ -272,15 +281,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     color:      c.text,
                   ),
                 ),
-                // typing أو last seen — نفس منطق صفحة الويب
-                                   
-                      Text(
-                  widget.otherUser.name,          // ← الاسم دايماً ثابت
-                  style: GoogleFonts.ibmPlexSansArabic(
-                    fontWeight: FontWeight.w700, fontSize: 16, color: c.text,
-                  ),
-                ),
-                AnimatedSwitcher(                 // ← السطر الثاني يتغير بين "يكتب..." و"آخر ظهور"
+                // السطر الثاني: "يكتب..." أو "آخر ظهور"
+                AnimatedSwitcher(
                   duration: const Duration(milliseconds: 200),
                   child: Text(
                     isTyping ? 'يكتب...' : (statusText ?? 'آخر ظهور مؤخراً'),
@@ -388,11 +390,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   // ── فقاعة الرسالة ──
   Widget _buildBubble(_LocalMessage local, bool isMe, AppColorScheme c) {
-    // ── حدد موقع الرسالة في مجموعتها ──
     final i            = _messages.indexOf(local);
     final prevSameUser = i > 0 && _messages[i-1].msg.senderId == local.msg.senderId;
     final nextSameUser = i < _messages.length - 1 && _messages[i+1].msg.senderId == local.msg.senderId;
-  
+
     return AnimatedOpacity(
       opacity:  local.status == _MsgStatus.sending ? 0.65 : 1.0,
       duration: const Duration(milliseconds: 200),
@@ -406,23 +407,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         onRetry:        local.status == _MsgStatus.failed ? () => _retry(local) : null,
       ),
     );
-  }
-  // ── أيقونة حالة الرسالة ──
-  Widget _statusIcon(_LocalMessage local, AppColorScheme c) {
-    switch (local.status) {
-      case _MsgStatus.sending:
-        return SizedBox(
-          width: 10, height: 10,
-          child: CircularProgressIndicator(
-            strokeWidth: 1.5,
-            color: Colors.white54,
-          ),
-        );
-      case _MsgStatus.failed:
-        return Icon(Icons.error_outline_rounded, size: 12, color: c.red);
-      case _MsgStatus.sent:
-        return Icon(Icons.done_rounded, size: 12, color: Colors.white54);
-    }
   }
 
   // ── منطقة الإدخال ──
@@ -482,7 +466,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   // ─────────────────────────────────────────────────
-  //  HELPERS — نفس دوال التاريخ من صفحة الويب
+  //  HELPERS
   // ─────────────────────────────────────────────────
   bool _sameDay(DateTime a, DateTime b) {
     final la = a.toLocal();

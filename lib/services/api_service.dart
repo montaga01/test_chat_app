@@ -19,11 +19,6 @@ class ApiService {
     };
   }
 
-  static Map<String, String> _headersWithToken(String token) => {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $token',
-      };
-
   // ═══════════════════════════════════════════════════
   //  AUTH
   // ═══════════════════════════════════════════════════
@@ -52,8 +47,12 @@ class ApiService {
       body: jsonEncode({'name': name, 'email': email, 'password': password}),
     );
     final data = jsonDecode(res.body);
-    if (res.statusCode != 200) throw data['detail'] ?? 'خطأ في التسجيل';
-    return data;
+    // ✅ إصلاح: تحقق من 200 و 201 معاً (بعض السيرفرات ترجع 201 عند الإنشاء)
+    if (res.statusCode != 200 && res.statusCode != 201) {
+      throw data['detail'] ?? 'خطأ في التسجيل';
+    }
+    // ✅ إصلاح: أرجع data['data'] بدلاً من data الكاملة — بنية موحدة مع login
+    return data['data'] as Map<String, dynamic>;
   }
 
   // ═══════════════════════════════════════════════════
@@ -81,6 +80,18 @@ class ApiService {
     final data = jsonDecode(res.body);
     if (res.statusCode != 200) throw data['detail'] ?? 'خطأ';
     return List<Map<String, dynamic>>.from(data['data']);
+  }
+
+  // ✅ إضافة: markRead كانت مستدعاة في chat_screen لكن مش موجودة
+  static Future<void> markRead(int peerId) async {
+    try {
+      await http.post(
+        Uri.parse('${AppConstants.baseUrl}/api/chats/$peerId/read'),
+        headers: await _headers(),
+      );
+    } catch (_) {
+      // صامت — عدم تحديث القراءة لا يكسر التطبيق
+    }
   }
 
   // ═══════════════════════════════════════════════════
@@ -111,43 +122,36 @@ class ApiService {
   }
 
   // ═══════════════════════════════════════════════════
-  //  PRESENCE — نفس منطق fetchPresenceHTTP() من صفحة الويب
-  //  يجرب عدة endpoints لأن الباك اند قد يختلف
+  //  PRESENCE
+  //  ✅ إصلاح: الـ endpoints الصحيحة اللي موجودة فعلاً في الباك اند
   // ═══════════════════════════════════════════════════
   static Future<UserPresence?> fetchPresence(int userId) async {
     final headers = await _headers();
+    try {
+      final res = await http
+          .get(
+            Uri.parse('${AppConstants.baseUrl}/api/users/$userId/presence'),
+            headers: headers,
+          )
+          .timeout(const Duration(seconds: 4));
 
-    // نفس قائمة الـ endpoints في صفحة الويب
-    final endpoints = [
-      '${AppConstants.baseUrl}/api/users/$userId/presence',
-      '${AppConstants.baseUrl}/api/presence/$userId',
-      '${AppConstants.baseUrl}/api/users/presence?user_id=$userId',
-    ];
-
-    for (final url in endpoints) {
-      try {
-        final res = await http
-            .get(Uri.parse(url), headers: headers)
-            .timeout(const Duration(seconds: 4));
-
-        if (res.statusCode == 200) {
-          final data = jsonDecode(res.body);
-          return UserPresence.fromHttpJson(data);
-        }
-      } catch (_) {
-        // جرب الـ endpoint التالي
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return UserPresence.fromHttpJson(data);
       }
+    } catch (_) {
+      // السيرفر مش متاح أو timeout
     }
     return null;
   }
 
   /// جلب presence لعدة مستخدمين دفعة واحدة
+  /// ✅ إصلاح: endpoint صحيح /api/presence/batch موجود في الباك اند
   static Future<Map<int, UserPresence>> fetchPresenceBatch(
       List<int> userIds) async {
     final result = <int, UserPresence>{};
     if (userIds.isEmpty) return result;
 
-    // نحاول endpoint جماعي أول
     try {
       final headers = await _headers();
       final res = await http
@@ -171,7 +175,7 @@ class ApiService {
       }
     } catch (_) {}
 
-    // fallback: نجيب كل واحد على حدة
+    // fallback: كل مستخدم على حدة
     await Future.wait(
       userIds.map((uid) async {
         final p = await fetchPresence(uid);
