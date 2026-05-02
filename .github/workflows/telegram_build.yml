@@ -1,0 +1,104 @@
+name: build-web-and-shorebird
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📂 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🚀 Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: 🐦 Setup Shorebird
+        uses: shorebirdtech/setup-shorebird@v1
+
+      - name: 📦 Install dependencies
+        run: flutter pub get
+
+      # ========== 1. بناء الويب ورفعه للسيرفر ==========
+      - name: 🌐 Build Web
+        run: flutter build web --release
+
+      - name: 🚀 Deploy Web to Server
+        run: |
+          cd build/web && zip -r ../../web-web.zip . && cd ../..
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | base64 --decode > /tmp/id_rsa
+          chmod 600 /tmp/id_rsa
+          scp -i /tmp/id_rsa -o StrictHostKeyChecking=no web-web.zip root@173.214.173.203:/root/
+          ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no root@173.214.173.203 << 'SERVER_EOF'
+            rm -rf ~/alrafeeg_api/test/*
+            mkdir -p ~/alrafeeg_api/temp_web/
+            unzip -o /root/web-web.zip -d ~/alrafeeg_api/temp_web/
+            cp -r ~/alrafeeg_api/temp_web/* ~/alrafeeg_api/test/
+            rm -rf ~/alrafeeg_api/temp_web/
+            mv /root/web-web.zip /root/web-web-$(date +%Y%m%d-%H%M%S).zip
+          SERVER_EOF
+          rm -f /tmp/id_rsa
+
+      # ========== 2. آلية المقارنة الذكية للأندرويد ==========
+      - name: 🧠 Smart Comparison Logic
+        id: check
+        run: |
+          LATEST_ON_SHOREBIRD="1.0.4+6"
+          CURRENT_APP_VER=$(grep version: pubspec.yaml | sed 's/version: //' | xargs)
+          echo "target=$CURRENT_APP_VER" >> $GITHUB_OUTPUT
+          if [ "$CURRENT_APP_VER" == "$LATEST_ON_SHOREBIRD" ]; then
+            echo "mode=patch" >> $GITHUB_OUTPUT
+          else
+            echo "mode=release" >> $GITHUB_OUTPUT
+          fi
+
+      # ========== 3. تنفيذ Shorebird بناءً على القرار ==========
+      - name: 🏗️ Execute Shorebird
+        run: |
+          if [ "${{ steps.check.outputs.mode }}" == "release" ]; then
+            yes | shorebird release android --artifact apk
+          else
+            yes | shorebird patch android --release-version=latest
+            flutter build apk --release
+          fi
+        env:
+          SHOREBIRD_TOKEN: ${{ secrets.SHOREBIRD_TOKEN }}
+
+      # ========== 4. رفع الـ APK على GitHub Releases ==========
+      - name: 📦 Upload APK to GitHub Releases
+        if: success() && steps.check.outputs.mode == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.check.outputs.target }}
+          name: "الرفيق v${{ steps.check.outputs.target }}"
+          files: build/app/outputs/flutter-apk/app-release.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ========== 5. إشعار تلجرام ==========
+      - name: 📢 Telegram Notification
+        if: success()
+        run: |
+          VER=${{ steps.check.outputs.target }}
+          MODE=${{ steps.check.outputs.mode }}
+          if [ "$MODE" == "release" ]; then
+            URL="https://github.com/${{ github.repository }}/releases/tag/v${VER}"
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d text="🏗️ نسخة جديدة: ${VER}%0A📥 تحميل الـ APK: ${URL}"
+          else
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+              -d text="✅ تم تحديث الويب وباتش الأندرويد: ${VER}"
+          fi
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

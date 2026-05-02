@@ -1,0 +1,57 @@
+workflows:
+  android-web-workflow:
+    name: Build APK and Web
+    max_build_duration: 60
+    environment:
+      groups:
+        - deployment
+      flutter: stable
+
+    scripts:
+      - name: Get Flutter packages
+        script: flutter pub get
+
+      # --- أولاً: بناء الويب ورفعه فوراً ---
+      - name: Build Web
+        script: flutter build web --release
+
+      - name: Deploy Web to Server (Immediately)
+        script: |
+          # 1. ضغط ملفات الويب
+          cd build/web && zip -r ../../web-web.zip . && cd ../..
+          
+          # 2. فك تشفير مفتاح الـ SSH وحفظه بتنسيق سليم
+          # تم استخدام base64 --decode لأن المتغير مخزن بصيغة مشفرة
+          echo "$SSH_PRIVATE_KEY" | base64 --decode > /tmp/id_rsa
+          chmod 600 /tmp/id_rsa
+
+          # 3. الرفع للسيرفر (SCP) باستخدام المفتاح المفكوك
+          scp -i /tmp/id_rsa -o StrictHostKeyChecking=no web-web.zip root@173.214.173.203:/root/
+          
+          # 4. فك الضغط والنقل داخل السيرفر (SSH)
+          ssh -i /tmp/id_rsa -o StrictHostKeyChecking=no root@173.214.173.203 << 'SERVER_EOF'
+            # تنظيف المجلد القديم
+            rm -rf ~/alrafeeg_api/test/*
+            # إنشاء المجلد المؤقت وفك الضغط
+            mkdir -p ~/alrafeeg_api/temp_web/
+            unzip -o /root/web-web.zip -d ~/alrafeeg_api/temp_web/
+            # نقل الملفات للمسار النهائي
+            cp -r ~/alrafeeg_api/temp_web/* ~/alrafeeg_api/test/
+            # تنظيف المخلفات
+            rm -rf ~/alrafeeg_api/temp_web/
+            # أرشفة الملف المضغوط بالتاريخ
+            mv /root/web-web.zip /root/web-web-$(date +%Y%m%d-%H%M%S).zip
+          SERVER_EOF
+
+          # تنظيف المفتاح من البيئة المؤقتة بعد الانتهاء لدواعي أمنية
+          rm -f /tmp/id_rsa
+
+      # --- ثانياً: بناء الأندرويد (يتم بعد الرفع) ---
+      - name: Build APK
+        script: flutter build apk --release
+        ignore_failure: true
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk
+      - build/web/**
+      - web-web.zip
