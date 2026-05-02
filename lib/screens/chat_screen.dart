@@ -2,305 +2,560 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
-import '../core/storage.dart';
+import '../core/theme.dart';
 import '../models/message.dart';
 import '../models/user.dart';
+import '../providers/theme_provider.dart';
+import '../providers/presence_provider.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
+import '../widgets/avatar_widget.dart';
+import '../widgets/typing_indicator.dart';
+
+// ── حالة الرسالة ──
+enum _MsgStatus { sending, sent, failed }
+
+class _LocalMessage {
+  final Message    msg;
+  _MsgStatus       status;
+  _LocalMessage({required this.msg, this.status = _MsgStatus.sent});
+}
 
 class ChatScreen extends StatefulWidget {
-  final ChatUser otherUser;
+  final ChatUser         otherUser;
+  final ThemeProvider    themeProvider;
+  final PresenceProvider presenceProvider;
+  final WebSocketService wsService;
+  final int              myId;
 
-  const ChatScreen({super.key, required this.otherUser});
+  const ChatScreen({
+    super.key,
+    required this.otherUser,
+    required this.themeProvider,
+    required this.presenceProvider,
+    required this.wsService,
+    required this.myId,
+  });
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
-  final _msgCtrl = TextEditingController();
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
+  final _msgCtrl    = TextEditingController();
   final _scrollCtrl = ScrollController();
-  final _wsService = WebSocketService();
 
-  List<Message> _messages = [];
-  int _myId = 0;
-  bool _loading = true;
-  StreamSubscription? _wsSub;
+  List<_LocalMessage> _messages = [];
+  bool                _loading  = true;
+
+  StreamSubscription? _msgSub;
+
+  // typing debounce
+  Timer? _typingTimer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _init();
   }
 
   Future<void> _init() async {
-    _myId = await AppStorage.getUserId() ?? 0;
-    final token = await AppStorage.getToken() ?? '';
-
     // تحميل الرسائل القديمة
     try {
       final msgs = await ApiService.getMessages(widget.otherUser.id);
-      if (mounted) {
-        setState(() { _messages = msgs; _loading = false; });
-        _scrollToBottom();
-      }
+      if (!mounted) return;
+      setState(() {
+        _messages = msgs.map((m) => _LocalMessage(msg: m)).toList();
+        _loading  = false;
+      });
+      _scrollToBottom(jump: true);
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
 
-    // الاتصال بـ WebSocket
-    _wsService.connect(token);
-    _wsSub = _wsService.messages.listen((msg) {
-      if (msg.senderId == widget.otherUser.id || msg.receiverId == widget.otherUser.id) {
-        if (mounted) {
-          setState(() => _messages.add(msg));
-          _scrollToBottom();
-        }
-      }
-    });
+    // اطلب presence — نفس requestPresence() + fetchPresenceHTTP() من JS
+    widget.presenceProvider.refreshUser(widget.otherUser.id);
+
+    // استمع للرسائل الواردة
+    _msgSub = widget.wsService.messages.listen(_onIncoming);
   }
 
+  // ── رسالة واردة ──
+  void _onIncoming(Message msg) {
+    final peer = widget.otherUser.id;
+    if (msg.senderId != peer && msg.receiverId != peer) return;
+    if (!mounted) return;
+
+    // تحديث presence المُرسل
+    widget.presenceProvider.markOnlineFromMessage(
+      msg.senderId,
+      msg.timestamp.toUtc().toIso8601String(),
+    );
+
+    setState(() {
+      _messages.add(_LocalMessage(msg: msg));
+    });
+    _scrollToBottom();
+  }
+
+  // ─────────────────────────────────────────────────
+  //  SEND
+  // ─────────────────────────────────────────────────
   void _send() async {
     final text = _msgCtrl.text.trim();
     if (text.isEmpty) return;
     _msgCtrl.clear();
+    _typingTimer?.cancel();
 
-    // إضافة الرسالة محلياً فوراً
+    // أضف الرسالة محلياً فوراً بحالة "جاري الإرسال"
     final tempMsg = Message(
-      id: DateTime.now().millisecondsSinceEpoch,
-      senderId: _myId,
+      id:         -DateTime.now().millisecondsSinceEpoch,
+      senderId:   widget.myId,
       receiverId: widget.otherUser.id,
-      content: text,
-      timestamp: DateTime.now(),
+      content:    text,
+      timestamp:  DateTime.now(),
     );
-    setState(() => _messages.add(tempMsg));
+    final local = _LocalMessage(msg: tempMsg, status: _MsgStatus.sending);
+    setState(() => _messages.add(local));
     _scrollToBottom();
 
-    try {
-      _wsService.sendMessage(receiverId: widget.otherUser.id, content: text);
-    } catch (_) {
-      try {
-        await ApiService.sendMessage(receiverId: widget.otherUser.id, content: text);
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('فشل الإرسال: $e')));
-        }
-      }
+    // حاول الإرسال عبر WS
+    if (widget.wsService.isConnected) {
+      widget.wsService.sendMessage(
+        receiverId: widget.otherUser.id,
+        content:    text,
+      );
+      // نفترض النجاح — WS لا يرجع confirm موثوق
+      setState(() => local.status = _MsgStatus.sent);
+    } else {
+      // HTTP fallback — نفس منطق chat_screen القديم
+      await _sendViaHttp(local, text);
     }
   }
 
-  void _scrollToBottom() {
+  Future<void> _sendViaHttp(_LocalMessage local, String text) async {
+    try {
+      await ApiService.sendMessage(
+        receiverId: widget.otherUser.id,
+        content:    text,
+      );
+      if (mounted) setState(() => local.status = _MsgStatus.sent);
+    } catch (_) {
+      if (mounted) setState(() => local.status = _MsgStatus.failed);
+    }
+  }
+
+  // ── إعادة إرسال رسالة فاشلة — حل مشكلة سقوط الرسائل ──
+  void _retry(_LocalMessage local) async {
+    setState(() => local.status = _MsgStatus.sending);
+
+    if (widget.wsService.isConnected) {
+      widget.wsService.sendMessage(
+        receiverId: widget.otherUser.id,
+        content:    local.msg.content,
+      );
+      setState(() => local.status = _MsgStatus.sent);
+    } else {
+      await _sendViaHttp(local, local.msg.content);
+    }
+  }
+
+  // ── typing indicator ──
+  void _onTextChanged(String _) {
+    widget.wsService.sendTyping(receiverId: widget.otherUser.id);
+    _typingTimer?.cancel();
+    _typingTimer = Timer(const Duration(seconds: 3), () {});
+  }
+
+  // ── scroll ──
+  void _scrollToBottom({bool jump = false}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
+      if (!_scrollCtrl.hasClients) return;
+      final max = _scrollCtrl.position.maxScrollExtent;
+      if (jump) {
+        _scrollCtrl.jumpTo(max);
+      } else {
         _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
+          max,
           duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
+          curve:    Curves.easeOut,
         );
       }
     });
   }
 
+  // ── lifecycle ──
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      widget.presenceProvider.refreshUser(widget.otherUser.id);
+    }
+  }
+
   @override
   void dispose() {
-    _wsSub?.cancel();
-    _wsService.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _msgSub?.cancel();
+    _typingTimer?.cancel();
     _msgCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
 
+  // ─────────────────────────────────────────────────
+  //  BUILD
+  // ─────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFf8faff),
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_forward_ios, size: 20),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Row(
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: const Color(0xFF1a56db).withOpacity(0.15),
-              child: Text(
-                widget.otherUser.name[0].toUpperCase(),
-                style: const TextStyle(
-                    color: Color(0xFF1a56db), fontWeight: FontWeight.bold),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Column(
+    final c = AppColors.of(context);
+
+    return ListenableBuilder(
+      listenable: widget.presenceProvider,
+      builder: (context, _) {
+        final isOnline = widget.presenceProvider.isOnline(widget.otherUser.id);
+        final isTyping = widget.presenceProvider.isTyping(widget.otherUser.id);
+        final statusText = isTyping
+            ? null
+            : widget.presenceProvider.lastSeenText(widget.otherUser.id);
+
+        return Scaffold(
+          backgroundColor: c.bg,
+          appBar: _buildAppBar(c, isOnline, isTyping, statusText),
+          body: Column(
+            children: [
+              Expanded(child: _buildMessageList(c)),
+              _buildInputArea(c),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // ── AppBar ──
+  PreferredSizeWidget _buildAppBar(
+    AppColorScheme c,
+    bool isOnline,
+    bool isTyping,
+    String? statusText,
+  ) {
+    return AppBar(
+      backgroundColor: c.bg2,
+      elevation: 0,
+      leading: IconButton(
+        icon: Icon(Icons.arrow_back_ios_new_rounded, size: 18, color: c.text2),
+        onPressed: () => Navigator.pop(context),
+      ),
+      title: Row(
+        children: [
+          // avatar مع online dot
+          AvatarWidget(
+            name:     widget.otherUser.name,
+            size:     36,
+            isOnline: isOnline,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(widget.otherUser.name,
-                    style: GoogleFonts.tajawal(
-                      fontWeight: FontWeight.w700,
-                      fontSize: 16,
-                      color: const Color(0xFF1a2340),
-                    )),
-                const Text(
-                  'متصل',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF22c55e)),
+                Text(
+                  widget.otherUser.name,
+                  style: GoogleFonts.ibmPlexSansArabic(
+                    fontWeight: FontWeight.w700,
+                    fontSize:   16,
+                    color:      c.text,
+                  ),
                 ),
+                // typing أو last seen — نفس منطق صفحة الويب
+                isTyping
+                    ? const TypingIndicator()
+                    : Text(
+                        statusText ?? 'آخر ظهور مؤخراً',
+                        style: GoogleFonts.ibmPlexSansArabic(
+                          fontSize: 12,
+                          color:    isOnline ? c.green : c.text2,
+                        ),
+                      ),
               ],
             ),
-          ],
-        ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(color: const Color(0xFFe2e8f8), height: 1),
-        ),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : _messages.isEmpty
-                    ? Center(
-                        child: Text('ابدأ المحادثة!',
-                            style: GoogleFonts.tajawal(color: Colors.grey)))
-                    : ListView.builder(
-                        controller: _scrollCtrl,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        itemCount: _messages.length,
-                        itemBuilder: (_, i) {
-                          final msg = _messages[i];
-                          final isMe = msg.senderId == _myId;
-                          return _buildMessageBubble(msg, isMe);
-                        },
-                      ),
           ),
+        ],
+      ),
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Container(color: c.border, height: 1),
+      ),
+      actions: [
+        // زر تبديل الثيم
+        GestureDetector(
+          onTap: () => widget.themeProvider.toggle(),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+            width: 34, height: 34,
+            decoration: BoxDecoration(
+              color: c.bg3,
+              border: Border.all(color: c.border),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(
+              widget.themeProvider.isDark
+                  ? Icons.light_mode_outlined
+                  : Icons.dark_mode_outlined,
+              size: 17, color: c.text2,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
-          // حقل الإرسال
+  // ── قائمة الرسائل ──
+  Widget _buildMessageList(AppColorScheme c) {
+    if (_loading) {
+      return Center(
+        child: CircularProgressIndicator(color: c.accent, strokeWidth: 2),
+      );
+    }
+    if (_messages.isEmpty) {
+      return Center(
+        child: Text(
+          'ابدأ المحادثة! 👋',
+          style: GoogleFonts.ibmPlexSansArabic(color: c.text3, fontSize: 14),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      controller:  _scrollCtrl,
+      padding:     const EdgeInsets.symmetric(vertical: 12),
+      itemCount:   _messages.length,
+      itemBuilder: (_, i) {
+        final local  = _messages[i];
+        final isMe   = local.msg.senderId == widget.myId;
+
+        // date divider — نفس date-div من صفحة الويب
+        final showDate = i == 0 ||
+            !_sameDay(_messages[i - 1].msg.timestamp, local.msg.timestamp);
+
+        return Column(
+          children: [
+            if (showDate) _buildDateDivider(local.msg.timestamp, c),
+            _buildBubble(local, isMe, c),
+          ],
+        );
+      },
+    );
+  }
+
+  // ── date divider ──
+  Widget _buildDateDivider(DateTime ts, AppColorScheme c) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Expanded(child: Container(height: 1, color: c.border)),
           Container(
-            color: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: SafeArea(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _msgCtrl,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
-                      textAlign: TextAlign.right,
-                      decoration: InputDecoration(
-                        hintText: 'اكتب رسالة...',
-                        hintStyle: GoogleFonts.tajawal(color: const Color(0xFF94a3b8)),
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 10),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: const BorderSide(color: Color(0xFFe2e8f8)),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: const BorderSide(color: Color(0xFFe2e8f8)),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: const BorderSide(
-                              color: Color(0xFF1a56db), width: 1.5),
-                        ),
-                        filled: true,
-                        fillColor: const Color(0xFFf8faff),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  InkWell(
-                    onTap: _send,
-                    borderRadius: BorderRadius.circular(50),
-                    child: Container(
-                      width: 48,
-                      height: 48,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF1a56db), Color(0xFF1e429f)],
-                        ),
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFF1a56db).withOpacity(0.35),
-                            blurRadius: 14,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: const Icon(Icons.send_rounded,
-                          color: Colors.white, size: 22),
-                    ),
-                  ),
-                ],
+            margin:  const EdgeInsets.symmetric(horizontal: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: AppDecorations.dateDivider(c),
+            child: Text(
+              _dayLabel(ts),
+              style: GoogleFonts.ibmPlexSansArabic(
+                fontSize: 11, color: c.text2,
               ),
             ),
           ),
+          Expanded(child: Container(height: 1, color: c.border)),
         ],
       ),
     );
   }
 
-  Widget _buildMessageBubble(Message message, bool isMe) {
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.72,
-        ),
-        decoration: BoxDecoration(
-          gradient: isMe
-              ? const LinearGradient(
-                  colors: [Color(0xFF1a56db), Color(0xFF1e429f)],
-                )
-              : null,
-          color: isMe ? null : Colors.white,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(18),
-            topRight: const Radius.circular(18),
-            bottomLeft: Radius.circular(isMe ? 18 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 18),
+  // ── فقاعة الرسالة ──
+  Widget _buildBubble(_LocalMessage local, bool isMe, AppColorScheme c) {
+    final msg        = local.msg;
+    final isFailed   = local.status == _MsgStatus.failed;
+    final isSending  = local.status == _MsgStatus.sending;
+
+    return AnimatedOpacity(
+      opacity:  isSending ? 0.65 : 1.0,
+      duration: const Duration(milliseconds: 200),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 3, horizontal: 12),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.72,
           ),
-          border: isMe
-              ? null
-              : Border.all(color: const Color(0xFFe2e8f8)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.06),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ],
+          child: Column(
+            crossAxisAlignment:
+                isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            children: [
+              // فقاعة النص
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 10,
+                ),
+                decoration: isMe
+                    ? AppDecorations.bubbleMe(c)
+                    : AppDecorations.bubbleOther(c),
+                child: Column(
+                  crossAxisAlignment: isMe
+                      ? CrossAxisAlignment.end
+                      : CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      msg.content,
+                      style: AppTextStyles.bubbleText(isMe: isMe, c: c),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          DateFormat('HH:mm').format(msg.timestamp.toLocal()),
+                          style: AppTextStyles.bubbleTime(isMe: isMe),
+                        ),
+                        // حالة الرسالة (للرسائل المُرسلة)
+                        if (isMe) ...[
+                          const SizedBox(width: 4),
+                          _statusIcon(local, c),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+
+              // زر إعادة الإرسال عند الفشل
+              if (isFailed)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: GestureDetector(
+                    onTap: () => _retry(local),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.refresh_rounded, size: 14, color: c.red),
+                        const SizedBox(width: 4),
+                        Text(
+                          'فشل — اضغط للإعادة',
+                          style: GoogleFonts.ibmPlexSansArabic(
+                            fontSize: 11, color: c.red,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
-        child: Column(
-          crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      ),
+    );
+  }
+
+  // ── أيقونة حالة الرسالة ──
+  Widget _statusIcon(_LocalMessage local, AppColorScheme c) {
+    switch (local.status) {
+      case _MsgStatus.sending:
+        return SizedBox(
+          width: 10, height: 10,
+          child: CircularProgressIndicator(
+            strokeWidth: 1.5,
+            color: Colors.white54,
+          ),
+        );
+      case _MsgStatus.failed:
+        return Icon(Icons.error_outline_rounded, size: 12, color: c.red);
+      case _MsgStatus.sent:
+        return Icon(Icons.done_rounded, size: 12, color: Colors.white54);
+    }
+  }
+
+  // ── منطقة الإدخال ──
+  Widget _buildInputArea(AppColorScheme c) {
+    return Container(
+      color: c.bg2,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      child: SafeArea(
+        child: Row(
           children: [
-            Text(
-              message.content,
-              style: TextStyle(
-                color: isMe ? Colors.white : const Color(0xFF1a2340),
-                fontSize: 15,
-                height: 1.6,
+            // حقل الكتابة
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color:  c.bg3,
+                  border: Border.all(color: c.border),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+                child: TextField(
+                  controller:      _msgCtrl,
+                  maxLines:        null,
+                  textInputAction: TextInputAction.send,
+                  textAlign:       TextAlign.right,
+                  style:           TextStyle(color: c.text, fontSize: 14),
+                  onChanged:       _onTextChanged,
+                  onSubmitted:     (_) => _send(),
+                  decoration: InputDecoration(
+                    hintText:  'اكتب رسالتك...',
+                    hintStyle: TextStyle(color: c.text3, fontSize: 14),
+                    border:    InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 10,
+                    ),
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              DateFormat('hh:mm a').format(message.timestamp.toLocal()),
-              style: TextStyle(
-                fontSize: 11,
-                color: isMe ? Colors.white60 : Colors.grey,
+            const SizedBox(width: 8),
+
+            // زر الإرسال
+            GestureDetector(
+              onTap: _send,
+              child: Container(
+                width: 44, height: 44,
+                decoration: AppDecorations.sendButton(c),
+                child: const Icon(
+                  Icons.send_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  // ─────────────────────────────────────────────────
+  //  HELPERS — نفس دوال التاريخ من صفحة الويب
+  // ─────────────────────────────────────────────────
+  bool _sameDay(DateTime a, DateTime b) {
+    final la = a.toLocal();
+    final lb = b.toLocal();
+    return la.year == lb.year && la.month == lb.month && la.day == lb.day;
+  }
+
+  String _dayLabel(DateTime ts) {
+    final local = ts.toLocal();
+    final now   = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day   = DateTime(local.year, local.month, local.day);
+    final diff  = today.difference(day).inDays;
+
+    if (diff == 0) return 'اليوم';
+    if (diff == 1) return 'أمس';
+    if (diff < 7) {
+      const weekdays = [
+        '', 'الاثنين', 'الثلاثاء', 'الأربعاء',
+        'الخميس', 'الجمعة', 'السبت', 'الأحد',
+      ];
+      return weekdays[local.weekday];
+    }
+    return '${local.day}/${local.month}/${local.year}';
   }
 }

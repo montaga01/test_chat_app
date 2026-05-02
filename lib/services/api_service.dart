@@ -4,9 +4,13 @@ import '../core/constants.dart';
 import '../core/storage.dart';
 import '../models/user.dart';
 import '../models/message.dart';
+import '../models/presence.dart';
 
 class ApiService {
-  // ========== Auth Headers ==========
+
+  // ═══════════════════════════════════════════════════
+  //  AUTH HEADERS
+  // ═══════════════════════════════════════════════════
   static Future<Map<String, String>> _headers() async {
     final token = await AppStorage.getToken();
     return {
@@ -15,7 +19,14 @@ class ApiService {
     };
   }
 
-  // ========== تسجيل دخول ==========
+  static Map<String, String> _headersWithToken(String token) => {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $token',
+      };
+
+  // ═══════════════════════════════════════════════════
+  //  AUTH
+  // ═══════════════════════════════════════════════════
   static Future<Map<String, dynamic>> login({
     required String email,
     required String password,
@@ -30,7 +41,6 @@ class ApiService {
     return data['data'];
   }
 
-  // ========== تسجيل حساب ==========
   static Future<Map<String, dynamic>> register({
     required String name,
     required String email,
@@ -46,7 +56,9 @@ class ApiService {
     return data;
   }
 
-  // ========== البحث عن مستخدمين ==========
+  // ═══════════════════════════════════════════════════
+  //  USERS
+  // ═══════════════════════════════════════════════════
   static Future<List<ChatUser>> searchUsers(String query) async {
     final res = await http.post(
       Uri.parse('${AppConstants.baseUrl}/api/users/search'),
@@ -58,7 +70,9 @@ class ApiService {
     return (data['data'] as List).map((u) => ChatUser.fromJson(u)).toList();
   }
 
-  // ========== قائمة المحادثات ==========
+  // ═══════════════════════════════════════════════════
+  //  CHATS
+  // ═══════════════════════════════════════════════════
   static Future<List<Map<String, dynamic>>> getChats() async {
     final res = await http.get(
       Uri.parse('${AppConstants.baseUrl}/api/chats'),
@@ -69,7 +83,9 @@ class ApiService {
     return List<Map<String, dynamic>>.from(data['data']);
   }
 
-  // ========== رسائل محادثة ==========
+  // ═══════════════════════════════════════════════════
+  //  MESSAGES
+  // ═══════════════════════════════════════════════════
   static Future<List<Message>> getMessages(int withUserId) async {
     final res = await http.get(
       Uri.parse('${AppConstants.baseUrl}/api/messages/$withUserId'),
@@ -80,9 +96,8 @@ class ApiService {
     return (data['data'] as List).map((m) => Message.fromJson(m)).toList();
   }
 
-  // ========== إرسال رسالة (HTTP fallback) ==========
   static Future<Message> sendMessage({
-    required int receiverId,
+    required int    receiverId,
     required String content,
   }) async {
     final res = await http.post(
@@ -93,5 +108,89 @@ class ApiService {
     final data = jsonDecode(res.body);
     if (res.statusCode != 200) throw data['detail'] ?? 'خطأ في الإرسال';
     return Message.fromJson(data['data']);
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  PRESENCE — نفس منطق fetchPresenceHTTP() من صفحة الويب
+  //  يجرب عدة endpoints لأن الباك اند قد يختلف
+  // ═══════════════════════════════════════════════════
+  static Future<UserPresence?> fetchPresence(int userId) async {
+    final headers = await _headers();
+
+    // نفس قائمة الـ endpoints في صفحة الويب
+    final endpoints = [
+      '${AppConstants.baseUrl}/api/users/$userId/presence',
+      '${AppConstants.baseUrl}/api/presence/$userId',
+      '${AppConstants.baseUrl}/api/users/presence?user_id=$userId',
+    ];
+
+    for (final url in endpoints) {
+      try {
+        final res = await http
+            .get(Uri.parse(url), headers: headers)
+            .timeout(const Duration(seconds: 4));
+
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          return UserPresence.fromHttpJson(data);
+        }
+      } catch (_) {
+        // جرب الـ endpoint التالي
+      }
+    }
+    return null;
+  }
+
+  /// جلب presence لعدة مستخدمين دفعة واحدة
+  static Future<Map<int, UserPresence>> fetchPresenceBatch(
+      List<int> userIds) async {
+    final result = <int, UserPresence>{};
+    if (userIds.isEmpty) return result;
+
+    // نحاول endpoint جماعي أول
+    try {
+      final headers = await _headers();
+      final res = await http
+          .post(
+            Uri.parse('${AppConstants.baseUrl}/api/presence/batch'),
+            headers: headers,
+            body: jsonEncode({'user_ids': userIds}),
+          )
+          .timeout(const Duration(seconds: 5));
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final list = data['data'] as List? ?? [];
+        for (final item in list) {
+          final uid = item['user_id'] as int?;
+          if (uid != null) {
+            result[uid] = UserPresence.fromHttpJson(item);
+          }
+        }
+        return result;
+      }
+    } catch (_) {}
+
+    // fallback: نجيب كل واحد على حدة
+    await Future.wait(
+      userIds.map((uid) async {
+        final p = await fetchPresence(uid);
+        if (p != null) result[uid] = p;
+      }),
+    );
+    return result;
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  FCM TOKEN
+  // ═══════════════════════════════════════════════════
+  static Future<void> updateFcmToken(String fcmToken) async {
+    try {
+      await http.post(
+        Uri.parse('${AppConstants.baseUrl}/api/update-fcm-token'),
+        headers: await _headers(),
+        body: jsonEncode({'fcm_token': fcmToken}),
+      );
+    } catch (_) {}
   }
 }

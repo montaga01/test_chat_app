@@ -1,28 +1,53 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../core/theme.dart';
 import '../services/api_service.dart';
+import '../providers/theme_provider.dart';
+import 'login_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
-  const RegisterScreen({super.key});
+  final ThemeProvider themeProvider;
+  const RegisterScreen({super.key, required this.themeProvider});
 
   @override
   State<RegisterScreen> createState() => _RegisterScreenState();
 }
 
-class _RegisterScreenState extends State<RegisterScreen> {
-  final _nameCtrl = TextEditingController();
-  final _emailCtrl = TextEditingController();
+class _RegisterScreenState extends State<RegisterScreen>
+    with SingleTickerProviderStateMixin {
+  final _nameCtrl     = TextEditingController();
+  final _emailCtrl    = TextEditingController();
   final _passwordCtrl = TextEditingController();
-  final _nameFocus = FocusNode();
-  final _emailFocus = FocusNode();
-  final _passwordFocus = FocusNode();
+  final _nameFocus    = FocusNode();
+  final _emailFocus   = FocusNode();
+  final _passwordFocus= FocusNode();
 
-  bool _loading = false;
-  bool _showPassword = false;
+  bool    _loading      = false;
+  bool    _showPassword = false;
   String? _error;
+
+  late AnimationController _animCtrl;
+  late Animation<double>   _fadeAnim;
+  late Animation<Offset>   _slideAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _animCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    );
+    _fadeAnim  = CurvedAnimation(parent: _animCtrl, curve: Curves.easeOut);
+    _slideAnim = Tween<Offset>(
+      begin: const Offset(0, 0.06),
+      end:   Offset.zero,
+    ).animate(CurvedAnimation(parent: _animCtrl, curve: Curves.easeOut));
+    _animCtrl.forward();
+  }
 
   @override
   void dispose() {
+    _animCtrl.dispose();
     _nameCtrl.dispose();
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
@@ -32,30 +57,62 @@ class _RegisterScreenState extends State<RegisterScreen> {
     super.dispose();
   }
 
+  // ═══════════════════════════════════════════════════
+  //  REGISTER
+  // ═══════════════════════════════════════════════════
   Future<void> _register() async {
+    final name  = _nameCtrl.text.trim();
+    final email = _emailCtrl.text.trim();
+    final pass  = _passwordCtrl.text;
+
+    if (name.isEmpty || email.isEmpty || pass.isEmpty) {
+      setState(() => _error = 'يرجى ملء جميع الحقول');
+      return;
+    }
+    if (pass.length < 6) {
+      setState(() => _error = 'كلمة المرور يجب أن تكون 6 أحرف على الأقل');
+      return;
+    }
+
     setState(() { _loading = true; _error = null; });
     try {
-      await ApiService.register(
-        name: _nameCtrl.text.trim(),
-        email: _emailCtrl.text.trim(),
-        password: _passwordCtrl.text,
-      );
+      await ApiService.register(name: name, email: email, password: pass);
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: const Row(
+          content: Row(
             children: [
-              Icon(Icons.check_circle, color: Colors.white),
-              SizedBox(width: 8),
-              Text('تم التسجيل بنجاح! سجّل دخولك الآن'),
+              const Icon(Icons.check_circle, color: Colors.white, size: 18),
+              const SizedBox(width: 8),
+              Text(
+                'تم إنشاء الحساب! سجّل دخولك الآن',
+                style: GoogleFonts.ibmPlexSansArabic(color: Colors.white),
+              ),
             ],
           ),
-          backgroundColor: Colors.green.shade600,
+          backgroundColor: const Color(0xFF3fb950),
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          margin: const EdgeInsets.all(16),
         ),
       );
-      Navigator.pop(context);
+
+      // انتقل لشاشة الدخول
+      Navigator.pushReplacement(
+        context,
+        PageRouteBuilder(
+          pageBuilder: (_, a, __) =>
+              LoginScreen(themeProvider: widget.themeProvider),
+          transitionsBuilder: (_, a, __, child) => SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(-1, 0),
+              end:   Offset.zero,
+            ).animate(a),
+            child: child,
+          ),
+        ),
+      );
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -63,250 +120,352 @@ class _RegisterScreenState extends State<RegisterScreen> {
     }
   }
 
+  // ═══════════════════════════════════════════════════
+  //  BUILD
+  // ═══════════════════════════════════════════════════
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
-    final isWide = size.width > 600;
+    final c      = AppColors.of(context);
+    final isWide = MediaQuery.of(context).size.width > 600;
 
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topRight,
-            end: Alignment.bottomLeft,
-            colors: [Color(0xFFe8eeff), Color(0xFFf0f4ff), Color(0xFFe8f0fe)],
+      backgroundColor: c.bg,
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.symmetric(
+              horizontal: isWide
+                  ? MediaQuery.of(context).size.width * 0.3
+                  : 20,
+              vertical: 28,
+            ),
+            child: FadeTransition(
+              opacity: _fadeAnim,
+              child: SlideTransition(
+                position: _slideAnim,
+                child: _buildCard(c),
+              ),
+            ),
           ),
         ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              // شريط علوي
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                child: Row(
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1a2340)),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                    Text(
-                      'إنشاء حساب جديد',
-                      style: GoogleFonts.tajawal(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: const Color(0xFF1a2340),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: Center(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.symmetric(
-                      horizontal: isWide ? size.width * 0.3 : 24,
-                      vertical: 20,
-                    ),
-                    child: Column(
-                      children: [
-                        Container(
-                          width: 70,
-                          height: 70,
-                          decoration: BoxDecoration(
-                            gradient: const LinearGradient(
-                              colors: [Color(0xFF1a56db), Color(0xFF1e429f)],
-                            ),
-                            borderRadius: BorderRadius.circular(20),
-                            boxShadow: [
-                              BoxShadow(
-                                color: const Color(0xFF1a56db).withOpacity(0.35),
-                                blurRadius: 16,
-                                offset: const Offset(0, 6),
-                              ),
-                            ],
-                          ),
-                          child: const Icon(Icons.person_add_rounded, color: Colors.white, size: 36),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'الرفيق',
-                          style: GoogleFonts.tajawal(
-                            fontSize: 26,
-                            fontWeight: FontWeight.bold,
-                            color: const Color(0xFF1a2340),
-                          ),
-                        ),
-                        const SizedBox(height: 28),
+      ),
+    );
+  }
 
-                        // الاسم
-                        TextField(
-                          controller: _nameCtrl,
-                          focusNode: _nameFocus,
-                          textInputAction: TextInputAction.next,
-                          onSubmitted: (_) =>
-                              FocusScope.of(context).requestFocus(_emailFocus),
-                          textAlign: TextAlign.right,
-                          decoration: InputDecoration(
-                            labelText: 'الاسم الكامل',
-                            prefixIcon: const Icon(Icons.person_outline),
-                            filled: true,
-                            fillColor: Colors.white,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: BorderSide(color: Colors.grey.shade200),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFFe2e8f8)),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFF1a56db), width: 1.5),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
+  Widget _buildCard(AppColorScheme c) {
+    return Container(
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color:  c.bg2,
+        border: Border.all(color: c.border),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.3),
+            blurRadius: 64,
+            offset: const Offset(0, 24),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── اللوغو ──
+          Container(
+            width: 60, height: 60,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: [c.bubbleMe1, c.bubbleMe2]),
+              borderRadius: BorderRadius.circular(18),
+              boxShadow: [
+                BoxShadow(color: c.accentGlow, blurRadius: 24, offset: const Offset(0, 8)),
+              ],
+            ),
+            child: const Icon(Icons.person_add_rounded, color: Colors.white, size: 28),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'الرفيق',
+            style: GoogleFonts.ibmPlexSansArabic(
+              fontSize: 24, fontWeight: FontWeight.w700, color: c.text,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'منصة المحادثات الفورية',
+            style: GoogleFonts.ibmPlexSansArabic(fontSize: 13, color: c.text2),
+          ),
+          const SizedBox(height: 28),
 
-                        // الإيميل
-                        TextField(
-                          controller: _emailCtrl,
-                          focusNode: _emailFocus,
-                          keyboardType: TextInputType.emailAddress,
-                          textInputAction: TextInputAction.next,
-                          onSubmitted: (_) =>
-                              FocusScope.of(context).requestFocus(_passwordFocus),
-                          textAlign: TextAlign.right,
-                          decoration: InputDecoration(
-                            labelText: 'البريد الإلكتروني',
-                            prefixIcon: const Icon(Icons.email_outlined),
-                            filled: true,
-                            fillColor: Colors.white,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: BorderSide(color: Colors.grey.shade200),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFFe2e8f8)),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFF1a56db), width: 1.5),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
+          // ── تبويبات ──
+          _buildTabs(c),
+          const SizedBox(height: 24),
 
-                        // كلمة المرور
-                        TextField(
-                          controller: _passwordCtrl,
-                          focusNode: _passwordFocus,
-                          obscureText: !_showPassword,
-                          textInputAction: TextInputAction.done,
-                          onSubmitted: (_) => _loading ? null : _register(),
-                          textAlign: TextAlign.right,
-                          decoration: InputDecoration(
-                            labelText: 'كلمة المرور (6 أحرف على الأقل)',
-                            prefixIcon: const Icon(Icons.lock_outline),
-                            suffixIcon: IconButton(
-                              icon: Icon(
-                                _showPassword ? Icons.visibility_off : Icons.visibility,
-                                color: Colors.grey,
-                              ),
-                              onPressed: () =>
-                                  setState(() => _showPassword = !_showPassword),
-                            ),
-                            filled: true,
-                            fillColor: Colors.white,
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: BorderSide(color: Colors.grey.shade200),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFFe2e8f8)),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              borderSide: const BorderSide(color: Color(0xFF1a56db), width: 1.5),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
+          // ── الاسم ──
+          _buildField(
+            c: c, label: 'الاسم', hint: 'اسمك الكريم',
+            icon: Icons.person_outline,
+            controller: _nameCtrl, focusNode: _nameFocus,
+            nextFocus: _emailFocus,
+            action: TextInputAction.next,
+          ),
+          const SizedBox(height: 14),
 
-                        if (_error != null)
-                          Container(
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFfef2f2),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: const Color(0xFFfecaca)),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(Icons.error_outline, color: Color(0xFFef4444), size: 16),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(_error!,
-                                      style: const TextStyle(color: Color(0xFFef4444), fontSize: 13)),
-                                ),
-                              ],
-                            ),
-                          ),
+          // ── الإيميل ──
+          _buildField(
+            c: c, label: 'البريد الإلكتروني', hint: 'example@mail.com',
+            icon: Icons.email_outlined,
+            controller: _emailCtrl, focusNode: _emailFocus,
+            nextFocus: _passwordFocus,
+            action: TextInputAction.next,
+            keyboard: TextInputType.emailAddress,
+          ),
+          const SizedBox(height: 14),
 
-                        const SizedBox(height: 24),
+          // ── كلمة المرور ──
+          _buildPasswordField(c),
+          const SizedBox(height: 12),
 
-                        SizedBox(
-                          width: double.infinity,
-                          height: 54,
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: const LinearGradient(
-                                colors: [Color(0xFF1a56db), Color(0xFF1e429f)],
-                              ),
-                              borderRadius: BorderRadius.circular(16),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: const Color(0xFF1a56db).withOpacity(0.4),
-                                  blurRadius: 18,
-                                  offset: const Offset(0, 6),
-                                ),
-                              ],
-                            ),
-                            child: ElevatedButton(
-                              onPressed: _loading ? null : _register,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.transparent,
-                                shadowColor: Colors.transparent,
-                                shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(16)),
-                              ),
-                              child: _loading
-                                  ? const SizedBox(
-                                      width: 24,
-                                      height: 24,
-                                      child: CircularProgressIndicator(
-                                          color: Colors.white, strokeWidth: 2.5),
-                                    )
-                                  : Text(
-                                      'إنشاء الحساب',
-                                      style: GoogleFonts.tajawal(
-                                        fontSize: 17,
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
+          // ── رسالة الخطأ ──
+          if (_error != null) _buildError(c),
+
+          const SizedBox(height: 20),
+
+          // ── زر إنشاء الحساب ──
+          _buildRegisterButton(c),
+
+          const SizedBox(height: 16),
+
+          // ── تبديل الثيم ──
+          _buildThemeToggle(c),
+        ],
+      ),
+    );
+  }
+
+  // ── تبويبات ──
+  Widget _buildTabs(AppColorScheme c) {
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: c.bg3,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: [
+          // دخول — inactive
+          Expanded(
+            child: GestureDetector(
+              onTap: () => Navigator.pushReplacement(
+                context,
+                PageRouteBuilder(
+                  pageBuilder: (_, a, __) =>
+                      LoginScreen(themeProvider: widget.themeProvider),
+                  transitionsBuilder: (_, a, __, child) => SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(-1, 0),
+                      end:   Offset.zero,
+                    ).animate(a),
+                    child: child,
                   ),
                 ),
               ),
-            ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'دخول',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.ibmPlexSansArabic(
+                    fontSize: 14, fontWeight: FontWeight.w500, color: c.text2,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          // تسجيل — active
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(colors: [c.bubbleMe1, c.bubbleMe2]),
+                borderRadius: BorderRadius.circular(7),
+                boxShadow: [BoxShadow(color: c.accentGlow, blurRadius: 12)],
+              ),
+              child: Text(
+                'تسجيل',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.ibmPlexSansArabic(
+                  fontSize: 14, fontWeight: FontWeight.w500, color: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── حقل عام ──
+  Widget _buildField({
+    required AppColorScheme c,
+    required String label,
+    required String hint,
+    required IconData icon,
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    FocusNode? nextFocus,
+    TextInputAction action = TextInputAction.next,
+    TextInputType keyboard = TextInputType.text,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: AppTextStyles.label(c)),
+        const SizedBox(height: 6),
+        TextField(
+          controller:      controller,
+          focusNode:       focusNode,
+          keyboardType:    keyboard,
+          textInputAction: action,
+          textAlign:       TextAlign.right,
+          style:           TextStyle(color: c.text),
+          onSubmitted: (_) {
+            if (nextFocus != null) {
+              FocusScope.of(context).requestFocus(nextFocus);
+            }
+          },
+          decoration: _inputDecoration(c: c, hint: hint, icon: icon),
+        ),
+      ],
+    );
+  }
+
+  // ── حقل كلمة المرور ──
+  Widget _buildPasswordField(AppColorScheme c) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('كلمة المرور', style: AppTextStyles.label(c)),
+        const SizedBox(height: 6),
+        TextField(
+          controller:      _passwordCtrl,
+          focusNode:       _passwordFocus,
+          obscureText:     !_showPassword,
+          textInputAction: TextInputAction.done,
+          textAlign:       TextAlign.right,
+          style:           TextStyle(color: c.text),
+          onSubmitted: (_) { if (!_loading) _register(); },
+          decoration: _inputDecoration(
+            c:    c,
+            hint: '6 أحرف على الأقل',
+            icon: Icons.lock_outline,
+            suffix: IconButton(
+              icon: Icon(
+                _showPassword ? Icons.visibility_off : Icons.visibility,
+                color: c.text2, size: 20,
+              ),
+              onPressed: () => setState(() => _showPassword = !_showPassword),
+            ),
           ),
         ),
+      ],
+    );
+  }
+
+  // ── رسالة الخطأ ──
+  Widget _buildError(AppColorScheme c) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      margin:  const EdgeInsets.only(bottom: 4),
+      decoration: AppDecorations.errorBox(c),
+      child: Row(
+        children: [
+          Icon(Icons.error_outline, color: c.red, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _error!,
+              style: GoogleFonts.ibmPlexSansArabic(fontSize: 13, color: c.red),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── زر إنشاء الحساب ──
+  Widget _buildRegisterButton(AppColorScheme c) {
+    return GestureDetector(
+      onTap: _loading ? null : _register,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width:  double.infinity,
+        height: 48,
+        decoration: _loading
+            ? BoxDecoration(color: c.bg3, borderRadius: BorderRadius.circular(10))
+            : AppDecorations.primaryButton(c),
+        child: Center(
+          child: _loading
+              ? SizedBox(
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(
+                    color: c.text2, strokeWidth: 2,
+                  ),
+                )
+              : Text('إنشاء حساب', style: AppTextStyles.button()),
+        ),
+      ),
+    );
+  }
+
+  // ── تبديل الثيم ──
+  Widget _buildThemeToggle(AppColorScheme c) {
+    final isDark = widget.themeProvider.isDark;
+    return GestureDetector(
+      onTap: () => widget.themeProvider.toggle(),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+            size: 16, color: c.text2,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            isDark ? 'الوضع النهاري' : 'الوضع الليلي',
+            style: GoogleFonts.ibmPlexSansArabic(fontSize: 13, color: c.text2),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── decoration مشترك للحقول ──
+  InputDecoration _inputDecoration({
+    required AppColorScheme c,
+    required String hint,
+    required IconData icon,
+    Widget? suffix,
+  }) {
+    return InputDecoration(
+      hintText:   hint,
+      hintStyle:  TextStyle(color: c.text3, fontSize: 13),
+      prefixIcon: Icon(icon, color: c.text2, size: 20),
+      suffixIcon: suffix,
+      filled:     true,
+      fillColor:  c.bg3,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.border),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: c.accent, width: 1.5),
       ),
     );
   }
